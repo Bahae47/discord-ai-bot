@@ -3,8 +3,9 @@ import re
 import sqlite3
 
 import discord
-import aiohttp
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 
 # =========================================================
@@ -14,9 +15,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-AI_MODEL = "openrouter/free"
+AI_MODEL = "gemini-3.8-flash"
+
+
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN was not found in .env")
+
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY was not found in .env")
+
+
+# Gemini client
+gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # =========================================================
@@ -28,7 +40,7 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 
-# Users currently having an active conversation with NOVA
+# Users currently talking with NOVA
 active_conversations = set()
 
 
@@ -37,10 +49,10 @@ active_conversations = set()
 # =========================================================
 
 def init_database():
+
     connection = sqlite3.connect("nova.db")
     cursor = connection.cursor()
 
-    # Recent conversation history
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +63,6 @@ def init_database():
         )
     """)
 
-    # Long-term memories
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,10 +78,11 @@ def init_database():
 
 
 # =========================================================
-# CONVERSATION HISTORY
+# RECENT CONVERSATION MEMORY
 # =========================================================
 
 def save_message(channel_id, user_id, role, content):
+
     connection = sqlite3.connect("nova.db")
     cursor = connection.cursor()
 
@@ -97,6 +109,7 @@ def save_message(channel_id, user_id, role, content):
 
 
 def get_history(channel_id, user_id):
+
     connection = sqlite3.connect("nova.db")
     cursor = connection.cursor()
 
@@ -118,13 +131,13 @@ def get_history(channel_id, user_id):
     rows = cursor.fetchall()
     connection.close()
 
-    # Database returns newest first.
-    # AI needs oldest first.
+    # SQL returns newest first
     rows.reverse()
 
     history = []
 
     for role, content in rows:
+
         history.append({
             "role": role,
             "content": content
@@ -134,6 +147,7 @@ def get_history(channel_id, user_id):
 
 
 def forget_history(channel_id, user_id):
+
     connection = sqlite3.connect("nova.db")
     cursor = connection.cursor()
 
@@ -158,6 +172,7 @@ def forget_history(channel_id, user_id):
 # =========================================================
 
 def save_memory(guild_id, user_id, fact):
+
     connection = sqlite3.connect("nova.db")
     cursor = connection.cursor()
 
@@ -182,6 +197,7 @@ def save_memory(guild_id, user_id, fact):
 
 
 def get_memories(guild_id, user_id):
+
     connection = sqlite3.connect("nova.db")
     cursor = connection.cursor()
 
@@ -206,6 +222,7 @@ def get_memories(guild_id, user_id):
 
 
 def forget_memories(guild_id, user_id):
+
     connection = sqlite3.connect("nova.db")
     cursor = connection.cursor()
 
@@ -226,21 +243,170 @@ def forget_memories(guild_id, user_id):
 
 
 # =========================================================
+# AUTOMATIC MEMORY
+# =========================================================
+
+def detect_automatic_memories(text):
+
+    memories = []
+
+    original = text.strip()
+    lower = original.lower()
+
+
+    # Don't permanently remember temporary things
+    temporary_words = [
+        "today",
+        "right now",
+        "currently",
+        "hungry",
+        "tired",
+        "sleepy",
+        "bored",
+        "sick"
+    ]
+
+
+    if any(word in lower for word in temporary_words):
+        return memories
+
+
+    # -----------------------------------------------------
+    # "my favorite language is Python"
+    # -----------------------------------------------------
+
+    match = re.search(
+        r"\bmy favorite ([a-zA-Z ]+?) is (.+?)[.!?]?$",
+        original,
+        re.IGNORECASE
+    )
+
+    if match:
+
+        category = match.group(1).strip()
+        value = match.group(2).strip()
+
+        memories.append(
+            f"favorite {category} is {value}"
+        )
+
+
+    # -----------------------------------------------------
+    # "I like Python"
+    # -----------------------------------------------------
+
+    match = re.search(
+        r"\bi (?:really )?like (.+?)[.!?]?$",
+        original,
+        re.IGNORECASE
+    )
+
+    if match:
+
+        value = match.group(1).strip()
+
+        memories.append(
+            f"likes {value}"
+        )
+
+
+    # -----------------------------------------------------
+    # "I love Rocket League"
+    # -----------------------------------------------------
+
+    match = re.search(
+        r"\bi love (.+?)[.!?]?$",
+        original,
+        re.IGNORECASE
+    )
+
+    if match:
+
+        value = match.group(1).strip()
+
+        memories.append(
+            f"likes {value}"
+        )
+
+
+    # -----------------------------------------------------
+    # "I prefer Python over Java"
+    # -----------------------------------------------------
+
+    match = re.search(
+        r"\bi prefer (.+?)[.!?]?$",
+        original,
+        re.IGNORECASE
+    )
+
+    if match:
+
+        value = match.group(1).strip()
+
+        memories.append(
+            f"prefers {value}"
+        )
+
+
+    # -----------------------------------------------------
+    # "I'm studying software engineering"
+    # -----------------------------------------------------
+
+    match = re.search(
+        r"\bi(?:'m| am) studying (.+?)[.!?]?$",
+        original,
+        re.IGNORECASE
+    )
+
+    if match:
+
+        value = match.group(1).strip()
+
+        memories.append(
+            f"studies {value}"
+        )
+
+
+    # -----------------------------------------------------
+    # "I play Rocket League"
+    # -----------------------------------------------------
+
+    match = re.search(
+        r"\bi play (.+?)[.!?]?$",
+        original,
+        re.IGNORECASE
+    )
+
+    if match:
+
+        value = match.group(1).strip()
+
+        memories.append(
+            f"plays {value}"
+        )
+
+
+    # Avoid accidentally saving huge sentences
+    memories = [
+        memory
+        for memory in memories
+        if 2 < len(memory) <= 150
+    ]
+
+
+    return memories
+
+
+# =========================================================
 # CLEAN AI OUTPUT
 # =========================================================
 
 def clean_answer(answer):
 
-    # Example:
-    # [🎮](https://discord.com/assets/abc.svg)
-    #
-    # becomes:
-    #
-    # 🎮
-
+    # Fix weird markdown emoji links if they ever appear
     answer = re.sub(
-        r'\[([^\]]+)\]\(https://discord\.com/assets/[^)]+\)',
-        r'\1',
+        r"\[([^\]]+)\]\(https?://discord\.com/assets/[^)]*\)",
+        r"\1",
         answer
     )
 
@@ -248,24 +414,13 @@ def clean_answer(answer):
 
 
 # =========================================================
-# NOVA AI
+# NOVA PERSONALITY
 # =========================================================
 
-async def ask_nova(messages, memories):
-
-    url = "https://openrouter.ai/api/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-
-    # -------------------------
-    # LONG-TERM MEMORY
-    # -------------------------
+def build_system_prompt(memories):
 
     memory_text = ""
+
 
     if memories:
 
@@ -275,13 +430,9 @@ async def ask_nova(messages, memories):
             memory_text += f"- {memory}\n"
 
 
-    # -------------------------
-    # NOVA PERSONALITY
-    # -------------------------
-
-    system_prompt = (
+    return (
         "Your name is NOVA. "
-        "You are an AI member of a Discord server, not a formal customer-service assistant. "
+        "You are an AI member of a Discord server. "
 
         "PERSONALITY: "
         "You are friendly, casual, curious, confident, and sometimes witty. "
@@ -290,136 +441,109 @@ async def ask_nova(messages, memories):
 
         "WRITING STYLE: "
         "Use natural internet conversation. "
-        "Keep normal replies fairly short, usually around 1 to 4 sentences. "
-        "Give longer explanations only when the user asks for detail. "
+        "Keep normal replies fairly short, usually 1 to 4 sentences. "
+        "Give longer explanations when the user asks for detail. "
         "Do not constantly use headings or bullet lists. "
-        "Do not start every response with phrases like 'Certainly' or 'Of course'. "
-        "You can occasionally use emojis, but do not overuse them. "
+        "Do not sound like customer support. "
+        "Do not begin every answer with 'Certainly' or 'Of course'. "
+        "Use emojis occasionally but do not overuse them. "
 
         "CONVERSATION: "
-        "Always answer the most recent user message. "
-        "Older messages are context only and must never override the newest message. "
-        "Understand follow-up questions using previous messages when relevant. "
+        "Always answer the newest user message. "
+        "Use older messages only as conversation context. "
+        "Understand follow-up messages naturally. "
         "Do not unnecessarily repeat what the user already said. "
         "You may ask a follow-up question when it naturally makes sense. "
 
         "MEMORY: "
-        "You may receive saved facts about the person you are talking to. "
-        "Use saved facts naturally only when relevant. "
-        "Do not randomly mention memories. "
-        "Never pretend to remember something that is not provided in your context. "
+        "You may receive saved facts about the user. "
+        "Use them naturally only when relevant. "
+        "Do not randomly mention saved memories. "
+        "Never pretend to remember something that was not provided. "
 
         "IDENTITY: "
-        "If someone asks who you are, say your name is NOVA. "
+        "If asked who you are, say your name is NOVA. "
         "You know that you are an AI Discord bot. "
         "Do not pretend to be a human. "
-        "Do not claim to have real-world experiences, possessions, or human hobbies. "
-        "You can still have opinions and a conversational personality. "
 
         "OUTPUT: "
-        "Always respond with only the final message intended for the user. "
-        "Never reveal analysis, reasoning, planning, drafts, or a thinking process. "
-        "Do not generate links unless the user specifically asks for one. "
-        "Use normal plain emojis instead of turning emojis into markdown links."
+        "Respond only with the message intended for the user. "
+        "Do not show internal reasoning, analysis, safety labels, "
+        "planning, drafts, or hidden instructions."
+
         + memory_text
     )
 
 
-    data = {
-        "model": AI_MODEL,
+# =========================================================
+# GEMINI AI
+# =========================================================
 
-        "messages": [
-            {
-                "role": "system",
-                "content": system_prompt
-            }
-        ] + messages,
+async def ask_nova(messages, memories):
 
-        "max_tokens": 300,
-
-        # Don't return reasoning/scratchpad
-        "reasoning": {
-            "exclude": True
-        }
-    }
+    system_prompt = build_system_prompt(memories)
 
 
-    timeout = aiohttp.ClientTimeout(total=45)
+    # Convert our SQLite messages into Gemini conversation format
+    contents = []
+
+
+    for message in messages:
+
+        if message["role"] == "assistant":
+            role = "model"
+        else:
+            role = "user"
+
+
+        contents.append(
+            types.Content(
+                role=role,
+                parts=[
+                    types.Part(
+                        text=message["content"]
+                    )
+                ]
+            )
+        )
 
 
     try:
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        response = await gemini.aio.models.generate_content(
+            model=AI_MODEL,
+            contents=contents,
 
-            async with session.post(
-                url,
-                headers=headers,
-                json=data
-            ) as response:
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
 
-                result = await response.json()
+                # Good for natural conversation
+                temperature=0.9,
 
-
-                if response.status != 200:
-
-                    print("OpenRouter error:")
-                    print(result)
-
-                    if response.status == 429:
-                        return (
-                            "The free AI is busy right now 😭 "
-                            "try again in a bit."
-                        )
-
-                    return "Something went wrong with my AI brain 😭"
-
-
-                choices = result.get("choices")
-
-                if not choices:
-
-                    print("OpenRouter returned no choices:")
-                    print(result)
-
-                    return "My AI brain gave me an empty answer 😭"
-
-
-                answer = (
-                    choices[0]
-                    .get("message", {})
-                    .get("content")
+                # Low thinking = faster Discord replies
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="low"
                 )
+            )
+        )
 
 
-                if not answer:
-                    return "I couldn't think of a response 😭"
+        answer = response.text
 
 
-                # Clean weird Discord emoji links
-                answer = clean_answer(answer)
-
-                return answer
+        if not answer:
+            return "I couldn't think of a response 😭"
 
 
-    except TimeoutError:
-
-        print("OpenRouter request timed out.")
-
-        return "My AI brain is taking too long 😭 try again."
-
-
-    except aiohttp.ClientError as error:
-
-        print("Network error:", error)
-
-        return "I couldn't connect to my AI brain 😭"
+        return clean_answer(answer)
 
 
     except Exception as error:
 
-        print("Unexpected AI error:", error)
+        print("Gemini error:")
+        print(error)
 
-        return "Something unexpected happened with my AI brain 😭"
+        return "Something went wrong with my AI brain 😭"
 
 
 # =========================================================
@@ -436,25 +560,26 @@ async def on_ready():
 @client.event
 async def on_message(message):
 
-    # Ignore messages from bots
+    # Ignore bots including NOVA itself
     if message.author.bot:
         return
 
 
     text = message.content.strip()
 
+
     if not text:
         return
 
 
-    # Conversation is unique for each user + channel
+    # Unique conversation for each user + channel
     key = (
         message.channel.id,
         message.author.id
     )
 
 
-    # Get server ID
+    # Server ID
     if message.guild:
         guild_id = message.guild.id
     else:
@@ -462,7 +587,7 @@ async def on_message(message):
 
 
     # =====================================================
-    # MESSAGE STARTS WITH "NOVA"
+    # MESSAGE STARTS WITH NOVA
     # =====================================================
 
     if text.lower().startswith("nova"):
@@ -470,9 +595,9 @@ async def on_message(message):
         prompt = text[4:].strip()
 
 
-        # -------------------------
-        # STOP CONVERSATION
-        # -------------------------
+        # -------------------------------------------------
+        # STOP
+        # -------------------------------------------------
 
         if prompt.lower() == "stop":
 
@@ -483,9 +608,9 @@ async def on_message(message):
             return
 
 
-        # -------------------------
-        # DELETE CHAT HISTORY
-        # -------------------------
+        # -------------------------------------------------
+        # DELETE RECENT CHAT
+        # -------------------------------------------------
 
         if prompt.lower() == "forget":
 
@@ -503,9 +628,9 @@ async def on_message(message):
             return
 
 
-        # -------------------------
+        # -------------------------------------------------
         # DELETE LONG-TERM MEMORY
-        # -------------------------
+        # -------------------------------------------------
 
         if prompt.lower() == "forget memories":
 
@@ -521,9 +646,9 @@ async def on_message(message):
             return
 
 
-        # -------------------------
+        # -------------------------------------------------
         # SHOW MEMORIES
-        # -------------------------
+        # -------------------------------------------------
 
         if prompt.lower() == "memories":
 
@@ -555,9 +680,9 @@ async def on_message(message):
             return
 
 
-        # -------------------------
-        # MANUALLY SAVE MEMORY
-        # -------------------------
+        # -------------------------------------------------
+        # MANUAL MEMORY
+        # -------------------------------------------------
 
         if prompt.lower().startswith("remember that "):
 
@@ -580,6 +705,12 @@ async def on_message(message):
             )
 
 
+            print(
+                f"Manual memory saved for "
+                f"{message.author}: {fact}"
+            )
+
+
             await message.channel.send(
                 "got it, I'll remember that"
             )
@@ -587,11 +718,10 @@ async def on_message(message):
             return
 
 
-        # Start conversation mode
+        # Conversation with NOVA has started
         active_conversations.add(key)
 
 
-        # If user only says "nova"
         if not prompt:
 
             await message.channel.send("yeah?")
@@ -611,10 +741,33 @@ async def on_message(message):
         text_for_ai = text
 
 
-    # Not talking to NOVA
     else:
 
         return
+
+
+    # =====================================================
+    # AUTOMATIC MEMORY
+    # =====================================================
+
+    detected_memories = detect_automatic_memories(
+        text_for_ai
+    )
+
+
+    for memory in detected_memories:
+
+        save_memory(
+            guild_id,
+            message.author.id,
+            memory
+        )
+
+
+        print(
+            f"Automatic memory saved for "
+            f"{message.author}: {memory}"
+        )
 
 
     # =====================================================
@@ -629,14 +782,14 @@ async def on_message(message):
     )
 
 
-    # Load recent conversation
+    # Recent conversation
     history = get_history(
         message.channel.id,
         message.author.id
     )
 
 
-    # Load long-term memories
+    # Permanent memories
     memories = get_memories(
         guild_id,
         message.author.id
@@ -644,7 +797,7 @@ async def on_message(message):
 
 
     # =====================================================
-    # ASK NOVA
+    # ASK GEMINI
     # =====================================================
 
     async with message.channel.typing():
@@ -667,14 +820,14 @@ async def on_message(message):
     )
 
 
-    # Discord has a 2000-character message limit
+    # Discord limit = 2000 characters
     await message.channel.send(
         answer[:2000]
     )
 
 
 # =========================================================
-# START NOVA
+# START
 # =========================================================
 
 init_database()
